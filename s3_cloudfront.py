@@ -13,7 +13,7 @@ cloudfront_client = boto3.client("cloudfront")
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-@s3_bp.route('/ui-build/upload', methods=['POST'])
+@s3_bp.route('/upload', methods=['POST'])
 def upload_files():
     data = request.get_json()
 
