@@ -1,65 +1,103 @@
-from flask import Blueprint, request, redirect, url_for, flash, jsonify
-import boto3
 import os
+import boto3
 import mimetypes
 import shutil
+import uuid
+from flask import Blueprint, request, jsonify
 
-s3_bp = Blueprint('s3', __name__)
+s3_bp = Blueprint('s3_bp', __name__)
 
-
+# AWS Clients
 s3_client = boto3.client("s3")
 cloudfront_client = boto3.client("cloudfront")
 
-UPLOAD_FOLDER = "uploads"
+UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-@s3_bp.route('/upload', methods=['POST'])
+def get_cloudfront_distribution_id(domain):
+    """Find CloudFront Distribution ID for the given domain."""
+    try:
+        response = cloudfront_client.list_distributions()
+        for distribution in response.get("DistributionList", {}).get("Items", []):
+            aliases = distribution.get("Aliases", {}).get("Items", [])
+            if domain in aliases:
+                return distribution["Id"]
+        return None
+    except Exception as e:
+        return str(e)
+
+@s3_bp.route('/api/upload', methods=['POST'])
 def upload_files():
-    data = request.get_json()
+    """Upload extracted files to S3 and invalidate CloudFront cache."""
+    if 'file' not in request.files:
+        return jsonify({"message": "No file uploaded.", "status": "error"}), 400
 
-    if not data:
-        return jsonify({"message": "Invalid request. JSON payload required.", "status": "error"}), 400
+    file = request.files['file']
+    bucket = request.form.get('bucket')
+    domain = request.form.get('domain')
 
-    bucket_name = data.get('bucket_name')
-    cloudfront_domain = data.get('cloudfront_domain')
-    files = request.files.getlist('files')
-
-    if not bucket_name or not cloudfront_domain:
+    if not bucket or not domain:
         return jsonify({"message": "Bucket Name and CloudFront Domain are required.", "status": "error"}), 400
 
-    if not files:
-        return jsonify({"message": "No files selected for upload.", "status": "error"}), 400
+    # Validate File Size (Max 10MB)
+    if file.content_length > 10 * 1024 * 1024:
+        return jsonify({"message": "File size exceeds 10MB limit.", "status": "error"}), 400
 
-    uploaded_files, errors = [], []
+    # Create unique extraction folder
+    extract_folder = os.path.join(UPLOAD_FOLDER, str(uuid.uuid4()))
+    os.makedirs(extract_folder, exist_ok=True)
 
-    for file in files:
-        if not file.filename:
-            continue
+    # Save and extract ZIP file
+    zip_path = os.path.join(extract_folder, file.filename)
+    file.save(zip_path)
 
-        local_file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-        file.save(local_file_path)
+    try:
+        shutil.unpack_archive(zip_path, extract_folder)
+    except Exception as e:
+        return jsonify({"message": f"Invalid archive: {str(e)}", "status": "error"}), 400
+    finally:
+        os.remove(zip_path)
 
-        content_type = mimetypes.guess_type(local_file_path)[0] or "application/octet-stream"
+    # **Step 1: Delete existing files in S3 bucket**
+    try:
+        objects = s3_client.list_objects_v2(Bucket=bucket)
+        if 'Contents' in objects:
+            delete_keys = [{'Key': obj['Key']} for obj in objects['Contents']]
+            s3_client.delete_objects(Bucket=bucket, Delete={'Objects': delete_keys})
+    except Exception as e:
+        return jsonify({"message": f"Failed to clear S3 bucket: {str(e)}", "status": "error"}), 400
 
-        try:
-            s3_client.upload_file(local_file_path, bucket_name, file.filename, ExtraArgs={"ContentType": content_type})
-            os.remove(local_file_path)
-            uploaded_files.append({"filename": file.filename, "status": "uploaded"})
-        except Exception as e:
-            errors.append({"filename": file.filename, "error": str(e)})
+    # **Step 2: Upload extracted files to S3 (Maintaining Folder Structure)**
+    uploaded_files = []
+    errors = []
+    parent_folder = os.listdir(extract_folder)[0]  # Get first folder inside extraction path
+    full_parent_path = os.path.join(extract_folder, parent_folder)
+    for root, _, files in os.walk(extract_folder):
+        for filename in files:
+            local_file_path = os.path.join(root, filename)
+            s3_key = os.path.relpath(local_file_path, full_parent_path).replace("\\", "/")  # Fix Windows path issue
+            content_type = mimetypes.guess_type(local_file_path)[0] or "application/octet-stream"
 
-    # Clean up the upload folder
-    if not os.listdir(UPLOAD_FOLDER):
-        shutil.rmtree(UPLOAD_FOLDER, ignore_errors=True)
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+            try:
+                s3_client.upload_file(local_file_path, bucket, s3_key, ExtraArgs={"ContentType": content_type})
+                uploaded_files.append({"filename": s3_key, "status": "uploaded"})
+            except Exception as e:
+                errors.append({"filename": s3_key, "error": str(e)})
 
-    # Create CloudFront invalidation
+    # Cleanup extracted files
+    shutil.rmtree(extract_folder, ignore_errors=True)
+
+    # **Step 3: Invalidate CloudFront Cache**
+    distribution_id = get_cloudfront_distribution_id(domain)
+    if not distribution_id:
+        return jsonify({"message": f"CloudFront Distribution not found for domain {domain}.", "status": "error"}), 400
+
     try:
         response = cloudfront_client.create_invalidation(
-            DistributionId=cloudfront_domain,
+            DistributionId=distribution_id,
             InvalidationBatch={
                 "Paths": {"Quantity": 1, "Items": ["/*"]},
-                "CallerReference": str(os.urandom(16))
+                "CallerReference": str(uuid.uuid4())
             }
         )
         cloudfront_status = {"invalidation_id": response["Invalidation"]["Id"], "status": "success"}
@@ -70,11 +108,12 @@ def upload_files():
         "uploaded_files": uploaded_files,
         "errors": errors,
         "cloudfront_status": cloudfront_status,
-        "message": "File upload process completed.",
+        "message": "File upload and deployment completed.",
         "status": "success" if uploaded_files else "error"
     })
 
-@s3_bp.route('/buckets', methods=['GET'])
+
+@s3_bp.route('/api/buckets', methods=['GET'])
 def list_buckets():
     """Returns a list of S3 bucket names"""
     response = s3_client.list_buckets()
@@ -92,8 +131,8 @@ def list_buckets():
             "status": "error"
         })
 
-@s3_bp.route('/domains', methods=['GET'])
-def list_cloudfront_domains():
+@s3_bp.route('/api/domains', methods=['GET'])
+def list_domains():
     """Returns a list of CloudFront alternate domain names"""
     response = cloudfront_client.list_distributions()
     domains = []
