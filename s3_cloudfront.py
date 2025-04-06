@@ -28,7 +28,7 @@ def get_cloudfront_distribution_id(domain):
     except Exception as e:
         return str(e)
 
-@s3_bp.route('/api/uploads', methods=['POST'])
+@s3_bp.route('/uploads', methods=['POST'])
 def upload_files():
     """Upload ZIP contents to S3 and invalidate CloudFront cache."""
     if 'file' not in request.files:
@@ -118,7 +118,7 @@ def upload_files():
 
 
 
-@s3_bp.route('/api/buckets', methods=['GET'])
+@s3_bp.route('/buckets', methods=['GET'])
 def list_buckets():
     """Return all available S3 buckets."""
     try:
@@ -136,7 +136,7 @@ def list_buckets():
             "status": "error"
         })
 
-@s3_bp.route('/api/domains', methods=['GET'])
+@s3_bp.route('/domains', methods=['GET'])
 def list_domains():
     """Return all CloudFront alternate domains."""
     try:
