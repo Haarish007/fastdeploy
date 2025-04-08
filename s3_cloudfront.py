@@ -120,7 +120,7 @@ def upload_files():
         return jsonify({
             "message": distribution_check["message"],
             "status": "error"
-        }), 400
+        }), 200
     # Step 3: Invalidate CloudFront cache
     distribution_id = distribution_check
 
@@ -136,13 +136,21 @@ def upload_files():
     except Exception as e:
         cloudfront_status = {"status": "error", "error": str(e)}
 
-    return jsonify({
-        "uploaded_files": uploaded_files,
-        "errors": errors,
-        "cloudfront_status": cloudfront_status,
-        "message": "File upload and deployment completed.",
-        "status": "success" if uploaded_files else "error"
-    })
+    if uploaded_files and not errors:
+        return jsonify({
+            "uploaded_files": uploaded_files,
+            "cloudfront_status": cloudfront_status,
+            "message": "All files uploaded successfully and CloudFront invalidated.",
+            "status": "success"
+        }), 200
+    else:
+        return jsonify({
+            "errors": errors,
+            "cloudfront_status": cloudfront_status,
+            "message": f"Bucket '{bucket}' does not match the origin of '{domain}'",
+            "status": "error"
+        }), 500
+
 
 
 
