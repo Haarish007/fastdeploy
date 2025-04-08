@@ -8,7 +8,7 @@ import os
 app = Flask(__name__)
 
 # ✅ Set config here
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:pentafox@localhost:5432/fastdeploy'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:postgres@localhost:5432/fastdeploy'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # ✅ Init db here

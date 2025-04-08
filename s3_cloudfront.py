@@ -17,12 +17,6 @@ UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def get_cloudfront_distribution_id(domain, bucket):
-    """
-    Find CloudFront Distribution ID for the given domain and validate S3 bucket origin.
-    Returns:
-        str: CloudFront distribution ID if found and bucket matches.
-        dict: Error details if not found or mismatched.
-    """
     try:
         response = cloudfront_client.list_distributions()
         distributions = response.get("DistributionList", {}).get("Items", [])
@@ -30,22 +24,21 @@ def get_cloudfront_distribution_id(domain, bucket):
         for distribution in distributions:
             aliases = distribution.get("Aliases", {}).get("Items", [])
             if domain in aliases:
-                # Found distribution for the domain
                 for origin in distribution.get("Origins", {}).get("Items", []):
                     domain_name = origin.get("DomainName", "")
-                    if domain_name.startswith(f"{bucket}.s3"):
+                    expected_origin = f"{bucket}.s3.ap-south-1.amazonaws.com"
+
+                    if domain_name == expected_origin:
                         return distribution["Id"]
-                
-                # Domain matched but bucket did not match
+
                 return {
-                    "error": "S3 bucket mismatch",
-                    "message": f"CloudFront distribution found for domain '{domain}', but no origin matches bucket '{bucket}'"
+                    "error": "Bucket mismatch",
+                    "message": f"Bucket '{bucket}' does not match the origin of '{domain}'"
                 }
 
-        # No distribution found for the domain
         return {
             "error": "Distribution not found",
-            "message": f"No CloudFront distribution found for domain '{domain}'"
+            "message": f"No distribution found for domain '{domain}'"
         }
 
     except Exception as e:
@@ -53,6 +46,7 @@ def get_cloudfront_distribution_id(domain, bucket):
             "error": "Exception",
             "message": str(e)
         }
+
 
 
 
@@ -119,10 +113,16 @@ def upload_files():
     # Clean up
     shutil.rmtree(extract_folder, ignore_errors=True)
 
+    
+    distribution_check = get_cloudfront_distribution_id(domain, bucket)
+
+    if isinstance(distribution_check, dict) and distribution_check.get("error"):
+        return jsonify({
+            "message": distribution_check["message"],
+            "status": "error"
+        }), 400
     # Step 3: Invalidate CloudFront cache
-    distribution_id = get_cloudfront_distribution_id(domain,bucket)
-    if not distribution_id:
-        return jsonify({"message": f"CloudFront Distribution not found for domain {domain}.", "status": "error"}), 400
+    distribution_id = distribution_check
 
     try:
         response = cloudfront_client.create_invalidation(
