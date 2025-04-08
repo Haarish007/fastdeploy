@@ -18,15 +18,12 @@ db.init_app(app)
 app.register_blueprint(s3_bp)
 app.register_blueprint(auth_bp)
 
-CORS(app, supports_credentials=True)
+from flask_cors import CORS
+
+# Add both local and production frontend URLs here
+CORS(app, origins=["https://deployzone.pentafox.in", "http://localhost:5173"], supports_credentials=True)
 app.secret_key = os.urandom(24)
 
-@app.after_request
-def after_request(response):
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE, PUT")
-    return response
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8004, debug=True)
