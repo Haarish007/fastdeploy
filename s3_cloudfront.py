@@ -1,5 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
+import io
 import os
 import uuid
+import zipfile
 import boto3
 import mimetypes
 import shutil
@@ -52,78 +55,59 @@ def get_cloudfront_distribution_id(domain, bucket):
 
 @s3_bp.route('/uploads', methods=['POST'])
 def upload_files():
-    """Upload ZIP contents to S3 and invalidate CloudFront cache."""
-    if 'file' not in request.files:
-        return jsonify({"message": "No file uploaded.", "status": "error"}), 400
-
-    file = request.files['file']
+    file = request.files.get('file')
     bucket = request.form.get('bucket')
     domain = request.form.get('domain')
 
-    if not bucket or not domain:
-        return jsonify({"message": "Bucket Name and CloudFront Domain are required.", "status": "error"}), 400
+    if not file or not bucket or not domain:
+        return jsonify({"message": "File, bucket, and domain are required.", "status": "error"}), 400
 
-    # Validate File Size (Max 10MB)
     if file.content_length > 10 * 1024 * 1024:
         return jsonify({"message": "File size exceeds 10MB limit.", "status": "error"}), 400
 
-    # Create unique extraction folder
-    extract_folder = os.path.join(UPLOAD_FOLDER, str(uuid.uuid4()))
-    os.makedirs(extract_folder, exist_ok=True)
-
-    # Save uploaded file
-    zip_path = os.path.join(extract_folder, file.filename)
-    file.save(zip_path)
-
     try:
-        shutil.unpack_archive(zip_path, extract_folder)
+        # Read zip file into memory
+        zip_bytes = io.BytesIO(file.read())
+        zipfile_obj = zipfile.ZipFile(zip_bytes)
     except Exception as e:
-        return jsonify({"message": f"Invalid archive: {str(e)}", "status": "error"}), 400
-    finally:
-        os.remove(zip_path)
+        return jsonify({"message": f"Invalid zip file: {str(e)}", "status": "error"}), 200
 
-    # Step 1: Clear S3 bucket
-    try:
-        objects = s3_client.list_objects_v2(Bucket=bucket)
-        if 'Contents' in objects:
-            delete_keys = [{'Key': obj['Key']} for obj in objects['Contents']]
-            s3_client.delete_objects(Bucket=bucket, Delete={'Objects': delete_keys})
-    except Exception as e:
-        return jsonify({"message": f"Failed to clear S3 bucket: {str(e)}", "status": "error"}), 400
+    # Validate CloudFront first
+    distribution_check = get_cloudfront_distribution_id(domain, bucket)
+    if isinstance(distribution_check, dict) and distribution_check.get("error"):
+        return jsonify({
+            "status": "error",
+            "message": distribution_check.get("message") or distribution_check.get("error")
+        }), 200
 
-    # Step 2: Upload extracted files to S3 (preserving folder structure)
+
+    distribution_id = distribution_check
+
+    # Upload in parallel
     uploaded_files = []
     errors = []
 
-    parent_folder = os.listdir(extract_folder)[0]
-    full_parent_path = os.path.join(extract_folder, parent_folder)
+    def upload_file(zip_info):
+        key = zip_info.filename
+        if key.endswith("/"):
+            return
+        try:
+            content = zipfile_obj.read(zip_info)
+            content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
+            s3_client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=content,
+                ContentType=content_type
+            )
+            uploaded_files.append({"filename": key, "status": "uploaded"})
+        except Exception as e:
+            errors.append({"filename": key, "error": str(e)})
 
-    for root, _, files in os.walk(extract_folder):
-        for filename in files:
-            local_file_path = os.path.join(root, filename)
-            s3_key = os.path.relpath(local_file_path, full_parent_path).replace("\\", "/")
-            content_type = mimetypes.guess_type(local_file_path)[0] or "application/octet-stream"
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        executor.map(upload_file, zipfile_obj.infolist())
 
-            try:
-                s3_client.upload_file(local_file_path, bucket, s3_key, ExtraArgs={"ContentType": content_type})
-                uploaded_files.append({"filename": s3_key, "status": "uploaded"})
-            except Exception as e:
-                errors.append({"filename": s3_key, "error": str(e)})
-
-    # Clean up
-    shutil.rmtree(extract_folder, ignore_errors=True)
-
-    
-    distribution_check = get_cloudfront_distribution_id(domain, bucket)
-
-    if isinstance(distribution_check, dict) and distribution_check.get("error"):
-        return jsonify({
-            "message": distribution_check["message"],
-            "status": "error"
-        }), 200
-    # Step 3: Invalidate CloudFront cache
-    distribution_id = distribution_check
-
+    # Invalidate CloudFront
     try:
         response = cloudfront_client.create_invalidation(
             DistributionId=distribution_id,
@@ -132,26 +116,21 @@ def upload_files():
                 "CallerReference": str(uuid.uuid4())
             }
         )
-        cloudfront_status = {"invalidation_id": response["Invalidation"]["Id"], "status": "success"}
+        cloudfront_status = {
+            "invalidation_id": response["Invalidation"]["Id"],
+            "status": "invalidated"
+        }
     except Exception as e:
         cloudfront_status = {"status": "error", "error": str(e)}
 
-    if uploaded_files and not errors:
-        return jsonify({
-            "uploaded_files": uploaded_files,
-            "cloudfront_status": cloudfront_status,
-            "message": "All files uploaded successfully and CloudFront invalidated.",
-            "status": "success"
-        }), 200
-    else:
-        return jsonify({
-            "errors": errors,
-            "cloudfront_status": cloudfront_status,
-            "message": f"Bucket '{bucket}' does not match the origin of '{domain}'",
-            "status": "error"
-        }), 500
-
-
+    status = "success" if not errors and cloudfront_status.get("status") != "error" else "error"
+    return jsonify({
+        "status": status,
+        "message": "Upload complete" if status == "success" else "Some errors occurred",
+        "uploaded_files": uploaded_files,
+        "errors": errors,
+        "cloudfront_status": cloudfront_status
+    }), 200
 
 
 @s3_bp.route('/buckets', methods=['GET'])
