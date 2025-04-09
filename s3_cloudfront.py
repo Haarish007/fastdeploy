@@ -126,7 +126,7 @@ def upload_files():
     status = "success" if not errors and cloudfront_status.get("status") != "error" else "error"
     return jsonify({
         "status": status,
-        "message": "Upload complete" if status == "success" else "Some errors occurred",
+        "message": "🚀 Deployment successful! All files have been uploaded and are ready to serve." if status == "success" else "Some errors occurred",
         "uploaded_files": uploaded_files,
         "errors": errors,
         "cloudfront_status": cloudfront_status
