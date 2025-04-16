@@ -103,7 +103,7 @@ def upload_files():
 
     def upload_file(zip_info):
         key = "/".join(zip_info.filename.split("/")[1:])
-        if key.endswith("/"):
+        if not key or key.endswith("/"):
             return
         try:
             content = zipfile_obj.read(zip_info)
@@ -116,7 +116,8 @@ def upload_files():
             )
             uploaded_files.append({"filename": key, "status": "uploaded"})
         except Exception as e:
-            errors.append({"filename": key, "error": str(e)})
+            errors.append({"filename": key or zip_info.filename, "error": str(e)})
+
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         executor.map(upload_file, zipfile_obj.infolist())
