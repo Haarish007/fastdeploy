@@ -66,13 +66,11 @@ def upload_files():
         return jsonify({"message": "File size exceeds 10MB limit.", "status": "error"}), 400
 
     try:
-        # Read zip file into memory
         zip_bytes = io.BytesIO(file.read())
         zipfile_obj = zipfile.ZipFile(zip_bytes)
     except Exception as e:
         return jsonify({"message": f"Invalid zip file: {str(e)}", "status": "error"}), 200
 
-    # Validate CloudFront first
     distribution_check = get_cloudfront_distribution_id(domain, bucket)
     if isinstance(distribution_check, dict) and distribution_check.get("error"):
         return jsonify({
@@ -80,10 +78,26 @@ def upload_files():
             "message": distribution_check.get("message") or distribution_check.get("error")
         }), 200
 
-
     distribution_id = distribution_check
 
-    # Upload in parallel
+    try:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=bucket)
+
+        keys_to_delete = []
+        for page in pages:
+            for obj in page.get('Contents', []):
+                keys_to_delete.append({'Key': obj['Key']})
+
+        if keys_to_delete:
+            for i in range(0, len(keys_to_delete), 1000):
+                s3_client.delete_objects(
+                    Bucket=bucket,
+                    Delete={'Objects': keys_to_delete[i:i + 1000]}
+                )
+    except Exception as e:
+        return jsonify({"message": f"Failed to clear existing files: {str(e)}", "status": "error"}), 500
+
     uploaded_files = []
     errors = []
 
@@ -107,7 +121,6 @@ def upload_files():
     with ThreadPoolExecutor(max_workers=10) as executor:
         executor.map(upload_file, zipfile_obj.infolist())
 
-    # Invalidate CloudFront
     try:
         response = cloudfront_client.create_invalidation(
             DistributionId=distribution_id,
@@ -131,7 +144,6 @@ def upload_files():
         "errors": errors,
         "cloudfront_status": cloudfront_status
     }), 200
-
 
 @s3_bp.route('/buckets', methods=['GET'])
 def list_buckets():
