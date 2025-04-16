@@ -102,7 +102,7 @@ def upload_files():
     errors = []
 
     def upload_file(zip_info):
-        key = zip_info.filename
+        key = "/".join(zip_info.filename.split("/")[1:])
         if key.endswith("/"):
             return
         try:
